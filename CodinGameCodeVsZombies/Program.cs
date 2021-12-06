@@ -19,6 +19,9 @@ class Player
         string[] inputs;
         int[] processOrder = Array.Empty<int>();
         int pIndex = 0;
+        int currentFinalScore = 0;
+        int currentScore = 0;
+        Simulation currentSim = new Simulation();
 
         // game loop
         while(true)
@@ -40,7 +43,7 @@ class Player
             for(int i = 0; i < humanCount; i++)
             {
                 inputs = Console.ReadLine().Split(' ');
-                humans.Add((int.Parse(inputs[0]), new HData 
+                humans.Add(((int.Parse(inputs[0]) * -1) - 1, new HData 
                 { 
                     X = int.Parse(inputs[1]), 
                     Y = int.Parse(inputs[2]) 
@@ -62,23 +65,50 @@ class Player
             inputReadAndBaseBuild.Stop();
             long currentProcessTime = inputReadAndBaseBuild.ElapsedTicks;
             Console.Error.WriteLine($"Input read and base build took {inputReadAndBaseBuild.ElapsedMilliseconds}ms");
+            Console.Error.WriteLine($"Current Score is believed to be {currentScore} | Expect Final {currentFinalScore}");
 
+            Population population = new Population(zeds, humans);
+            (int[] testOrder, int testFinalScore) = population.GetFittestSubject(20, 6, 0.30, currentProcessTime, 90 - currentSim.round, false);
+
+            //if(testFinalScore >= currentFinalScore - currentScore)
             if(processOrder == Array.Empty<int>())
             {
-                Population population = new Population(zeds, humans);
-                processOrder = population.GetFittestSubject(10, 6, 0.30, currentProcessTime, false);
+                processOrder = testOrder;
+                currentFinalScore = testFinalScore + currentScore;
+
+                currentSim = new Simulation(zeds, humans, processOrder, true);
+                currentSim.OverrideScore(currentScore);
+                new Simulation(zeds, humans, processOrder, true).RunSimulation();
+                pIndex = 0;
             }
             
+            currentSim.RunNextSimRound();
+            currentScore = currentSim.Score;
+
+            Console.Error.Write($"Next round score is expected to be {currentScore} | Expect Final {currentFinalScore} | Genome");
+            foreach(int v in processOrder)
+            {
+                Console.Error.Write(v.ToString());
+            }
+            Console.Error.WriteLine();
+
             Zeds = zeds.ToDictionary(kvp => kvp.id, kvp => new Zed { Data = kvp.data });
             Humans = humans.ToDictionary(kvp => kvp.id, kvp => new Human { Data = kvp.data });
 
             bool moveDetermined = false;
             while(!moveDetermined)
             {
-                int zId = processOrder[pIndex];
-                if(Zeds.ContainsKey(zId))
+                int tId = processOrder[pIndex];
+                
+                if(tId >= 0 && Zeds.ContainsKey(tId))
                 {
-                    ZedUtil.MoveAsh(Zeds[zId].ZXNext, Zeds[zId].ZYNext, Humans[Constants.AshId]);
+                    ZedUtil.MoveAsh(Zeds[tId].ZXNext, Zeds[tId].ZYNext, Humans[Constants.AshId], false);
+                    Console.WriteLine($"{Humans[Constants.AshId].X} {Humans[Constants.AshId].Y}");
+                    moveDetermined = true;
+                }    
+                else if(Humans.ContainsKey(tId))
+                {
+                    ZedUtil.MoveAsh(Humans[tId].X, Humans[tId].Y, Humans[Constants.AshId], true);
                     Console.WriteLine($"{Humans[Constants.AshId].X} {Humans[Constants.AshId].Y}");
                     moveDetermined = true;
                 }
@@ -104,7 +134,7 @@ public class Population
         this.Humans = humans;
     }
 
-    public int[] GetFittestSubject(int initialPopulationSize, int survivorConstraintSize, double mutationChance, long currentProcessMs, bool shouldLog = false)
+    public (int[], int) GetFittestSubject(int initialPopulationSize, int survivorConstraintSize, double mutationChance, long currentProcessMs, int fullProcessTimeAllocationInMs, bool shouldLog = false)
     {
         Dictionary<int[], int> fitnessResults = new Dictionary<int[], int>();
         Stopwatch initialPopTime = new Stopwatch();
@@ -121,7 +151,7 @@ public class Population
         int generationsProcessed = 0;
 
         //while(++generationsProcessed < numberOfGenerations)
-        while(currentProcessMs < (95 * 1000000))
+        while(currentProcessMs < (fullProcessTimeAllocationInMs * 1000000))
         {
             generationsProcessed++;
             if(shouldLog) Console.Error.WriteLine($"Processing Generation {generationsProcessed}");
@@ -142,28 +172,71 @@ public class Population
         
         Console.Error.WriteLine($"Full processing of population evolution took {currentProcessMs / 1000000 }ms. Processed {generationsProcessed} generations");
 
-        Console.Error.WriteLine($"Final Fitness report for population");
-        foreach(KeyValuePair<int[], int> kvp in fitnessResults)
+        if(shouldLog)
         {
-            if(kvp.Value != 0)
+            Console.Error.WriteLine($"Final Fitness report for population");
+            foreach(KeyValuePair<int[], int> kvp in fitnessResults)
             {
-                foreach(int v in kvp.Key)
+                if(kvp.Value != 0)
                 {
-                    Console.Error.Write(v.ToString());
-                }
+                    foreach(int v in kvp.Key)
+                    {
+                        Console.Error.Write(v.ToString());
+                    }
 
-                Console.Error.WriteLine($" results in a score of {kvp.Value}");
+                    Console.Error.WriteLine($" results in a score of {kvp.Value}");
+                }
             }
         }
 
-        return fitnessResults.OrderBy(kvp => -kvp.Value).First().Key;
+        return fitnessResults.OrderBy(kvp => -kvp.Value).Select(kvp => (kvp.Key, kvp.Value)).First();
     }
 
     private IEnumerable<Simulation> CreateInitialPopulation(int populationSize, Random random, bool shouldLog = false)
     {
+        bool gauranteedZedFirstSeedGenerated = false;
+        bool gauranteedHumanFirstSeedGenerated = false;
         for(int i = 0; i < populationSize; i++)
         {
-            yield return new Simulation(this.Zeds, this.Humans, this.Zeds.OrderBy(_ => random.Next()).Select(zed => zed.id), shouldLog);
+            if(!gauranteedZedFirstSeedGenerated)
+            {
+                yield return new Simulation(
+                    this.Zeds,
+                    this.Humans,
+                    this.Zeds.OrderBy(_ => random.Next())
+                             .Select(zed => zed.id)
+                             .Union(this.Humans.OrderBy(_ => random.Next())
+                                               .Where(h => h.id != Constants.AshId)
+                                               .Select(h => h.id)),
+                    shouldLog);
+                gauranteedZedFirstSeedGenerated = true;
+            }
+            else if(!gauranteedHumanFirstSeedGenerated)
+            {
+                yield return new Simulation(
+                    this.Zeds,
+                    this.Humans,
+                    this.Humans.OrderBy(_ => random.Next())
+                                .Where(h => h.id != Constants.AshId)
+                                .Select(h => h.id)
+                                .Union(this.Zeds.OrderBy(_ => random.Next())
+                                                .Select(zed => zed.id)),
+                    shouldLog);
+            }
+            else
+            {
+                yield return new Simulation(
+                    this.Zeds,
+                    this.Humans,
+                    this.Zeds.OrderBy(_ => random.Next())
+                             .Select(zed => zed.id)
+                             .Union(this.Humans.OrderBy(_ => random.Next())
+                                               .Where(h => h.id != Constants.AshId)
+                                               .Select(h => h.id))
+                             .OrderBy(_ => random.Next()),
+                    shouldLog);
+                gauranteedZedFirstSeedGenerated = true;
+            }
         }
     }
 }
@@ -325,7 +398,7 @@ public static class PopulationExtensions
     public static IEnumerable<Simulation> DetermineSurvivors(this IEnumerable<Simulation> unselectedPopulation, int survivorConstraintSize, bool shouldLog = false)
     {
         if(shouldLog) Console.Error.WriteLine("Determining survivors of a generation");
-        return unselectedPopulation.OrderBy(competitor => -competitor.Score).Take(survivorConstraintSize);
+        return unselectedPopulation.OrderBy(competitor => -competitor.Score).ThenBy(competitor => -competitor.round).Take(survivorConstraintSize);
     }
 }
 
@@ -357,20 +430,30 @@ public class Simulation
 
     public int RunSimulation()
     {
-        while(this.Zeds.Any())
+        this.pIndex = 0;
+        while(this.Zeds.Any() && this.pIndex < this.ProcessOrder.Length)
         {
-            for(this.pIndex = 0; this.pIndex < this.ProcessOrder.Length; this.pIndex++)
+            int tId = this.ProcessOrder[this.pIndex];
+            if(tId >= 0 && this.Zeds.ContainsKey(tId))
             {
-                int zId = this.ProcessOrder[this.pIndex];
-                if(this.Zeds.ContainsKey(zId))
-                {
-                    ZedUtil.MoveZombies(this.Zeds, this.Humans);
-                    ZedUtil.MoveAsh(this.Zeds[zId].X, this.Zeds[zId].Y, this.Humans[Constants.AshId]);
-                    this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
-                    if(this.shouldLog) this.LogState();
-                    this.round++;
-                }
+                ZedUtil.MoveZombies(this.Zeds, this.Humans);
+                ZedUtil.MoveAsh(this.Zeds[tId].X, this.Zeds[tId].Y, this.Humans[Constants.AshId], false, this.shouldLog);
+                this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
+                if(this.shouldLog) this.LogState();
+                this.pIndex--;
+                this.round++;
             }
+            else if(tId < 0 && this.Humans.ContainsKey(tId))
+            {
+                ZedUtil.MoveZombies(this.Zeds, this.Humans);
+                ZedUtil.MoveAsh(this.Humans[tId].X, this.Humans[tId].Y, this.Humans[Constants.AshId], true, this.shouldLog);
+                this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
+                if(this.shouldLog) this.LogState();
+                this.pIndex--;
+                this.round++;
+            }
+            this.pIndex++;
+
         }
         return this.score;
     }
@@ -379,13 +462,22 @@ public class Simulation
     {
         while(this.Zeds.Any())
         {
-            for(this.pIndex = this.pIndex; this.pIndex < this.ProcessOrder.Length; this.pIndex++)
+            for(this.pIndex = 0; this.pIndex < this.ProcessOrder.Length; this.pIndex++)
             {
-                int zId = this.ProcessOrder[this.pIndex];
-                if(this.Zeds.ContainsKey(zId))
+                int tId = this.ProcessOrder[this.pIndex];
+                if(tId >= 0 && this.Zeds.ContainsKey(tId))
                 {
                     ZedUtil.MoveZombies(this.Zeds, this.Humans);
-                    ZedUtil.MoveAsh(this.Zeds[zId].X, this.Zeds[zId].Y, this.Humans[Constants.AshId]);
+                    ZedUtil.MoveAsh(this.Zeds[tId].X, this.Zeds[tId].Y, this.Humans[Constants.AshId], false, this.shouldLog);
+                    this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
+                    if(this.shouldLog) this.LogState();
+                    this.round++;
+                    return true;
+                }
+                else if(tId < 0 && this.Humans.ContainsKey(tId))
+                {
+                    ZedUtil.MoveZombies(this.Zeds, this.Humans);
+                    ZedUtil.MoveAsh(this.Humans[tId].X, this.Humans[tId].Y, this.Humans[Constants.AshId], true, this.shouldLog);
                     this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
                     if(this.shouldLog) this.LogState();
                     this.round++;
@@ -398,16 +490,16 @@ public class Simulation
 
     public void LogState()
     {
-        Console.Error.WriteLine($"Logging Round {this.round}");
-        foreach(KeyValuePair<int, Zed> zed in this.Zeds)
-        {
-            Console.Error.WriteLine($"Zed {zed.Key} ({zed.Value.X},{zed.Value.Y})");
-        }
+        //Console.Error.WriteLine($"Logging Round {this.round}");
+        //foreach(KeyValuePair<int, Zed> zed in this.Zeds)
+        //{
+        //    Console.Error.WriteLine($"Zed {zed.Key} ({zed.Value.X},{zed.Value.Y})");
+        //}
 
-        foreach(KeyValuePair<int, Human> human in this.Humans)
-        {
-            Console.Error.WriteLine($"Human {human.Key} ({human.Value.X},{human.Value.Y})");
-        }
+        //foreach(KeyValuePair<int, Human> human in this.Humans)
+        //{
+        //    Console.Error.WriteLine($"Human {human.Key * -1 + 1} ({human.Value.X},{human.Value.Y})");
+        //}
     }
 
     public void OverrideScore(int score)
@@ -453,7 +545,7 @@ public struct ZData
 
 public static class Constants
 {
-    public const int AshId = -5;
+    public const int AshId = -50000;
 }
 
 
@@ -468,18 +560,20 @@ public static class ZedUtil
         }
     }
 
-    public static void MoveAsh(int zX, int zY, Human ash)
+    public static void MoveAsh(int zX, int zY, Human ash, bool stopAtLocation, bool shouldLog = false)
     {
         int distanceToZed = Utility.CalculateDistanceAsInt(ash.X, ash.Y, zX, zY);
-        //if(distanceToZed <= 1000)
-        //{
-        //    ash.Data = new HData { X = zX, Y = zY };
-        //}
-        //else
-        //{
+        if(shouldLog) Console.Error.Write($"Moving ash from ({ash.X},{ash.Y} towards ({zX},{zX}) )");
+        if(distanceToZed <= 1000 && stopAtLocation)
+        {
+            ash.Data = new HData { X = zX, Y = zY };
+        }
+        else
+        {
             (int nX, int nY) = Utility.ProjectDistanceFromPointToPoint(ash.X, ash.Y, zX, zY, 1000);
-            ash.Data = new HData { X = nX, Y = nY };
-        //}
+            ash.Data = new HData { X = Math.Max(Math.Min(nX, 16000), 0) , Y = Math.Max(Math.Min(nY, 9000), 0) };
+        }
+        if(shouldLog) Console.Error.WriteLine($"resulting at ({ash.X},{ash.Y})");
     }
 
     public static (int X, int Y) DetermineAndMoveToClosestHuman(int zX, int zY, IEnumerable<HData> humans)
@@ -516,7 +610,7 @@ public static class ZedUtil
                 if(zed.X == human.Value.X && zed.Y == human.Value.Y)
                 {
                     humans.Remove(human.Key);
-                    if(shouldLog) Console.Error.WriteLine($"--SIM-- Human {human.Key} at ({human.Value.X},{human.Value.Y}");
+                    if(shouldLog) Console.Error.WriteLine($"--SIM-- Human {human.Key} at ({human.Value.X},{human.Value.Y})");
                 }
             }
         }
@@ -534,7 +628,7 @@ public static class ZedUtil
 
 public class Fibonacci
 {
-    public Fibonacci() { this.a = 0; this.b = 1; }
+    public Fibonacci() { this.a = 1; this.b = 1; }
 
     private int a;
     private int b;
