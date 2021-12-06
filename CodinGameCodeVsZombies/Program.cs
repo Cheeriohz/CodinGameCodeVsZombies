@@ -18,7 +18,7 @@ class Player
         
         string[] inputs;
         int[] processOrder = Array.Empty<int>();
-        int pIndex = 0;
+        int pIndex = Constants.GENERAL_GENOME_START;
         int currentFinalScore = 0;
         int currentScore = 0;
         Simulation currentSim = new Simulation();
@@ -77,10 +77,10 @@ class Player
                 processOrder = testOrder;
                 currentFinalScore = testFinalScore + currentScore;
 
-                currentSim = new Simulation(environmentData, processOrder, true);
+                currentSim = new Simulation(environmentData, true).SetGenome(processOrder);
                 currentSim.OverrideScore(currentScore);
-                new Simulation(environmentData, processOrder, true).RunSimulation();
-                pIndex = 0;
+                new Simulation(environmentData, true).SetGenome(processOrder).RunSimulation();
+                pIndex = Constants.GENERAL_GENOME_START;
             }
             
             currentSim.RunNextSimRound();
@@ -109,7 +109,7 @@ class Player
                 }    
                 else if(Humans.ContainsKey(tId))
                 {
-                    ZedUtil.MoveAsh(Humans[tId].X, Humans[tId].Y, Humans[Constants.AshId], true);
+                    ZedUtil.MoveAsh(Humans[tId].X, Humans[tId].Y, Humans[Constants.AshId], currentSim.StopAtCivilian);
                     Console.WriteLine($"{Humans[Constants.AshId].X} {Humans[Constants.AshId].Y}");
                     moveDetermined = true;
                 }
@@ -131,6 +131,7 @@ public class Population
     public Population(IEnvironmentData<IEnumerable<int>> environmentData)
     {
         this.EnvironmentData = environmentData;
+        this.CurrentGeneration = Array.Empty<Simulation>();
     }
 
     public (int[], int) GetFittestSubject(int initialPopulationSize, int survivorConstraintSize, double mutationChance, long currentProcessMs, int fullProcessTimeAllocationInMs, bool shouldLog = false)
@@ -195,7 +196,14 @@ public class Population
     {
         foreach(IEnumerable<int> genome in this.EnvironmentData.BuildBasePopulationGenome(random, populationSize))
         {
-            yield return new Simulation(this.EnvironmentData, genome, shouldLog);
+            int[] genomeArray = genome.ToArray();
+            foreach(int v in genomeArray)
+            {
+                Console.Error.Write(v.ToString());
+            }
+            Console.Error.WriteLine(" was generated for initial population");
+
+            yield return new Simulation(this.EnvironmentData, shouldLog).SetGenome(genomeArray);
         }
     }
 }
@@ -211,8 +219,11 @@ public static class PopulationExtensions
 
         int?[] result = new int?[fitterGenome.Count];
         HashSet<int> alreadyInSequence = new HashSet<int>();
-        int stockSize = random.Next(0, fitterGenome.Count);
-        int stockOffset = random.Next(0, fitterGenome.Count - stockSize);
+        int stockSize = random.Next(Constants.GENERAL_GENOME_START, fitterGenome.Count);
+        int stockOffset = random.Next(0, Math.Max(fitterGenome.Count - stockSize - Constants.GENERAL_GENOME_START, 0));
+
+        result[0] = (random.NextDouble() > .65) ? fitterGenome.ElementAt(0) : partnerGenome.ElementAt(0);
+        result[1] = (random.NextDouble() > .65) ? fitterGenome.ElementAt(1) : partnerGenome.ElementAt(1);
 
         for(int i = stockOffset; i < stockOffset + stockSize; i++)
         {
@@ -223,8 +234,8 @@ public static class PopulationExtensions
 
         int[] remainingGenomeFromPartner = partnerGenome.Where(allele => !alreadyInSequence.Contains(allele)).ToArray();
 
-        int rInd = 0; 
-        int pInd = 0;
+        int rInd = Constants.GENERAL_GENOME_START; 
+        int pInd = Constants.GENERAL_GENOME_START;
 
         while(rInd < fitterGenome.Count && pInd < remainingGenomeFromPartner.Length)
         {
@@ -243,11 +254,15 @@ public static class PopulationExtensions
 
                 Console.Error.WriteLine();
             }
-            
         }
 
+        
+
         if(shouldLog) Console.Error.WriteLine($"Crossover Complete");
-        return result.Cast<int>();
+        foreach(int? v in result)
+        {
+            yield return v ?? 0;
+        }
     }
 
     public static IEnumerable<int> Mutate(this IEnumerable<int> baseGenome, double mutationChance, bool shouldLog = false)
@@ -311,7 +326,8 @@ public static class PopulationExtensions
         for(int i = 0; i < childCount; i++)
         {
             sw.Restart();
-            yield return new Simulation(environmentData, aGroup[i].ProcessOrder.Crossover(bGroup[i].ProcessOrder, shouldLog).Mutate(mutationChance, shouldLog), shouldLog);
+            int[] crossBredGenome = aGroup[i].GetGenome().Crossover(bGroup[i].GetGenome()).Mutate(mutationChance, shouldLog).ToArray();
+            yield return new Simulation(environmentData, shouldLog).SetGenome(crossBredGenome);
             if(shouldLog) Console.Error.WriteLine($"  Time for breedResult {sw.ElapsedMilliseconds}ms");
         }
     }
@@ -321,12 +337,12 @@ public static class PopulationExtensions
         if(shouldLog) Console.Error.WriteLine("Determining a fitness for a generation");
         foreach(Simulation competitor in competitorsToEvaluate)
         {
-            if(allResults.TryGetValue(competitor.ProcessOrder, out int preCalculatedResult))
+            if(allResults.TryGetValue(competitor.GetGenome(), out int preCalculatedResult))
             {
                 if(shouldLog)
                 {
                     Console.Error.Write($"Score of {preCalculatedResult} was already in cache for ");
-                    foreach(int v in competitor.ProcessOrder)
+                    foreach(int v in competitor.GetGenome())
                     {
                         Console.Error.Write(v.ToString());
                     }
@@ -338,7 +354,7 @@ public static class PopulationExtensions
             else
             {
                 competitor.RunSimulation();
-                allResults[competitor.ProcessOrder] = competitor.Score;
+                allResults[competitor.GetGenome()] = competitor.Score;
             }
             yield return competitor;
         }
@@ -361,11 +377,11 @@ public static class PopulationExtensions
     }
 }
 
-public interface IGenome<T>
+public interface IGenome<T,V>
 {
     T GetGenome();
 
-    void SetGenome(T genome);
+    V SetGenome(T genome);
 }
 
 public interface IEnvironmentData<T>
@@ -395,36 +411,58 @@ public class CVZEnvironmentData : IEnvironmentData<IEnumerable<int>>
     {
         bool gauranteedZedFirstSeedGenerated = false;
         bool gauranteedHumanFirstSeedGenerated = false;
+        bool guaranteedCivStop = false;
+        bool guaranteedCivGo = false;
         for(int i = 0; i < populationSize; i++)
         {
             if(!gauranteedZedFirstSeedGenerated)
             {
-                yield return
+                yield return new [] { random.Next(0, 1) , 0}.Concat(
                     this.Zeds.OrderBy(_ => random.Next())
                              .Select(zed => zed.id)
                              .Union(this.Humans.OrderBy(_ => random.Next())
                                                .Where(h => h.id != Constants.AshId)
-                                               .Select(h => h.id));
+                                               .Select(h => h.id)));
                     
                 gauranteedZedFirstSeedGenerated = true;
             }
             else if(!gauranteedHumanFirstSeedGenerated)
             {
-                yield return this.Humans.OrderBy(_ => random.Next())
+                yield return new[] { random.Next(0, 1), 0 }.Concat(this.Humans.OrderBy(_ => random.Next())
                                 .Where(h => h.id != Constants.AshId)
                                 .Select(h => h.id)
                                 .Union(this.Zeds.OrderBy(_ => random.Next())
-                                                .Select(zed => zed.id));
+                                                .Select(zed => zed.id)));
                 gauranteedHumanFirstSeedGenerated = true;
             }
-            else
+            else if(!guaranteedCivStop)
             {
-                yield return this.Zeds.OrderBy(_ => random.Next())
+                yield return new[] { 1, 0 }.Concat(this.Zeds.OrderBy(_ => random.Next())
                              .Select(zed => zed.id)
                              .Union(this.Humans.OrderBy(_ => random.Next())
                                                .Where(h => h.id != Constants.AshId)
                                                .Select(h => h.id))
-                             .OrderBy(_ => random.Next());
+                             .OrderBy(_ => random.Next()));
+
+            }
+            else if(!guaranteedCivGo)
+            {
+                yield return new[] { 0, 0 }.Concat(this.Zeds.OrderBy(_ => random.Next())
+                             .Select(zed => zed.id)
+                             .Union(this.Humans.OrderBy(_ => random.Next())
+                                               .Where(h => h.id != Constants.AshId)
+                                               .Select(h => h.id))
+                             .OrderBy(_ => random.Next()));
+
+            }
+            else
+            {
+                yield return new[] { random.Next(0, 1), 0 }.Concat(this.Zeds.OrderBy(_ => random.Next())
+                             .Select(zed => zed.id)
+                             .Union(this.Humans.OrderBy(_ => random.Next())
+                                               .Where(h => h.id != Constants.AshId)
+                                               .Select(h => h.id))
+                             .OrderBy(_ => random.Next()));
                 
             }
         }
@@ -438,7 +476,7 @@ public class CVZEnvironmentData : IEnvironmentData<IEnumerable<int>>
 }
 
 
-public class Simulation : IGenome<int[]>
+public class Simulation : IGenome<int[], Simulation>
 {
     Dictionary<int, Zed> Zeds;
     Dictionary<int, Human> Humans;
@@ -447,7 +485,10 @@ public class Simulation : IGenome<int[]>
     public int Score => this.Humans.Values.Count == 1 ? 0 : this.score;
     private int score = 0;
     int pIndex = 0;
-    public int[] ProcessOrder;
+    private int[]? ProcessOrder;
+    public bool StopAtCivilian;
+    int CentroidSize = 0;
+    private bool UseCentroid => this.CentroidSize > 0;
     bool shouldLog = false;
 
     public Simulation() 
@@ -456,18 +497,17 @@ public class Simulation : IGenome<int[]>
         this.Humans = new Dictionary<int, Human>();
         this.ProcessOrder = Array.Empty<int>();
     }
-    public Simulation(IEnvironmentData<IEnumerable<int>> environmentData, IEnumerable<int> processOrder, bool shouldLog = false)
+    public Simulation(IEnvironmentData<IEnumerable<int>> environmentData, bool shouldLog = false)
     {
         this.Zeds = ((ICollection<(int id, ZData data)>)environmentData.GetEnvironmentItem(Constants.ZEDS)).ToDictionary(kvp => kvp.id, kvp => new Zed { Data = kvp.data });
         this.Humans = ((ICollection<(int id, HData data)>)environmentData.GetEnvironmentItem(Constants.HUMANS)).ToDictionary(kvp => kvp.id, kvp => new Human { Data = kvp.data });
-        this.ProcessOrder = processOrder.ToArray();
         this.shouldLog = shouldLog;
     }
 
     public int RunSimulation()
     {
         this.pIndex = 0;
-        while(this.Zeds.Any() && this.pIndex < this.ProcessOrder.Length)
+        while(this.Zeds.Any() && this.pIndex < this.ProcessOrder?.Length)
         {
             int tId = this.ProcessOrder[this.pIndex];
             if(tId >= 0 && this.Zeds.ContainsKey(tId))
@@ -482,7 +522,7 @@ public class Simulation : IGenome<int[]>
             else if(tId < 0 && this.Humans.ContainsKey(tId))
             {
                 ZedUtil.MoveZombies(this.Zeds, this.Humans);
-                ZedUtil.MoveAsh(this.Humans[tId].X, this.Humans[tId].Y, this.Humans[Constants.AshId], true, this.shouldLog);
+                ZedUtil.MoveAsh(this.Humans[tId].X, this.Humans[tId].Y, this.Humans[Constants.AshId], this.StopAtCivilian, this.shouldLog);
                 this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
                 if(this.shouldLog) this.LogState();
                 this.pIndex--;
@@ -498,7 +538,7 @@ public class Simulation : IGenome<int[]>
     {
         while(this.Zeds.Any())
         {
-            for(this.pIndex = 0; this.pIndex < this.ProcessOrder.Length; this.pIndex++)
+            for(this.pIndex = 0; this.pIndex < this.ProcessOrder?.Length; this.pIndex++)
             {
                 int tId = this.ProcessOrder[this.pIndex];
                 if(tId >= 0 && this.Zeds.ContainsKey(tId))
@@ -513,7 +553,7 @@ public class Simulation : IGenome<int[]>
                 else if(tId < 0 && this.Humans.ContainsKey(tId))
                 {
                     ZedUtil.MoveZombies(this.Zeds, this.Humans);
-                    ZedUtil.MoveAsh(this.Humans[tId].X, this.Humans[tId].Y, this.Humans[Constants.AshId], true, this.shouldLog);
+                    ZedUtil.MoveAsh(this.Humans[tId].X, this.Humans[tId].Y, this.Humans[Constants.AshId], this.StopAtCivilian, this.shouldLog);
                     this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
                     if(this.shouldLog) this.LogState();
                     this.round++;
@@ -545,12 +585,15 @@ public class Simulation : IGenome<int[]>
 
     public int[] GetGenome()
     {
-        return this.ProcessOrder;
+        return new [] { this.StopAtCivilian ? 1 : 0, this.CentroidSize  }.Concat(this.ProcessOrder ?? Array.Empty<int>()).ToArray();
     }
 
-    public void SetGenome(int[] genome)
+    public Simulation SetGenome(int[] genome)
     {
-        this.ProcessOrder = genome;
+        this.StopAtCivilian = genome[0] == 1;
+        this.CentroidSize = genome[1];
+        this.ProcessOrder = genome[Constants.GENERAL_GENOME_START..];
+        return this;
     }
 }
 
@@ -591,6 +634,7 @@ public struct ZData
 
 public static class Constants
 {
+    public const int GENERAL_GENOME_START = 2;
     public const int AshId = -50000;
     public const string ZEDS = "ZEDS";
     public const string HUMANS = "HUMANS";
