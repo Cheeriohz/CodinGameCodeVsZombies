@@ -67,7 +67,8 @@ class Player
             Console.Error.WriteLine($"Input read and base build took {inputReadAndBaseBuild.ElapsedMilliseconds}ms");
             Console.Error.WriteLine($"Current Score is believed to be {currentScore} | Expect Final {currentFinalScore}");
 
-            Population population = new Population(zeds, humans);
+            CVZEnvironmentData environmentData = new CVZEnvironmentData(zeds, humans);
+            Population population = new Population(environmentData);
             (int[] testOrder, int testFinalScore) = population.GetFittestSubject(20, 6, 0.30, currentProcessTime, 90 - currentSim.round, false);
 
             //if(testFinalScore >= currentFinalScore - currentScore)
@@ -76,21 +77,21 @@ class Player
                 processOrder = testOrder;
                 currentFinalScore = testFinalScore + currentScore;
 
-                currentSim = new Simulation(zeds, humans, processOrder, true);
+                currentSim = new Simulation(environmentData, processOrder, true);
                 currentSim.OverrideScore(currentScore);
-                new Simulation(zeds, humans, processOrder, true).RunSimulation();
+                new Simulation(environmentData, processOrder, true).RunSimulation();
                 pIndex = 0;
             }
             
             currentSim.RunNextSimRound();
             currentScore = currentSim.Score;
 
-            Console.Error.Write($"Next round score is expected to be {currentScore} | Expect Final {currentFinalScore} | Genome");
+            Console.Error.Write($"Next round score is expected to be {currentScore} | Expect Final {currentFinalScore} | Genome [");
             foreach(int v in processOrder)
             {
                 Console.Error.Write(v.ToString());
             }
-            Console.Error.WriteLine();
+            Console.Error.WriteLine("]");
 
             Zeds = zeds.ToDictionary(kvp => kvp.id, kvp => new Zed { Data = kvp.data });
             Humans = humans.ToDictionary(kvp => kvp.id, kvp => new Human { Data = kvp.data });
@@ -123,15 +124,13 @@ class Player
 
 public class Population
 {
-    private ICollection<(int id, ZData data)> Zeds { get; set; }
-    private ICollection<(int id, HData data)> Humans { get; set; }
+    private IEnvironmentData<IEnumerable<int>> EnvironmentData { get; set; }
 
     public Simulation[] CurrentGeneration { get; set; }
 
-    public Population(ICollection<(int id, ZData data)> zeds, ICollection<(int id, HData data)> humans)
+    public Population(IEnvironmentData<IEnumerable<int>> environmentData)
     {
-        this.Zeds = zeds;
-        this.Humans = humans;
+        this.EnvironmentData = environmentData;
     }
 
     public (int[], int) GetFittestSubject(int initialPopulationSize, int survivorConstraintSize, double mutationChance, long currentProcessMs, int fullProcessTimeAllocationInMs, bool shouldLog = false)
@@ -159,7 +158,7 @@ public class Population
             generationTime.Start();
 
             this.CurrentGeneration 
-                = this.CurrentGeneration.GenerateOffSpring(this.Zeds, this.Humans, mutationChance)
+                = this.CurrentGeneration.GenerateOffSpring(this.EnvironmentData, mutationChance)
                       .DetermineFitness(fitnessResults)
                       .DetermineSurvivors(survivorConstraintSize).ToArray();
 
@@ -194,49 +193,9 @@ public class Population
 
     private IEnumerable<Simulation> CreateInitialPopulation(int populationSize, Random random, bool shouldLog = false)
     {
-        bool gauranteedZedFirstSeedGenerated = false;
-        bool gauranteedHumanFirstSeedGenerated = false;
-        for(int i = 0; i < populationSize; i++)
+        foreach(IEnumerable<int> genome in this.EnvironmentData.BuildBasePopulationGenome(random, populationSize))
         {
-            if(!gauranteedZedFirstSeedGenerated)
-            {
-                yield return new Simulation(
-                    this.Zeds,
-                    this.Humans,
-                    this.Zeds.OrderBy(_ => random.Next())
-                             .Select(zed => zed.id)
-                             .Union(this.Humans.OrderBy(_ => random.Next())
-                                               .Where(h => h.id != Constants.AshId)
-                                               .Select(h => h.id)),
-                    shouldLog);
-                gauranteedZedFirstSeedGenerated = true;
-            }
-            else if(!gauranteedHumanFirstSeedGenerated)
-            {
-                yield return new Simulation(
-                    this.Zeds,
-                    this.Humans,
-                    this.Humans.OrderBy(_ => random.Next())
-                                .Where(h => h.id != Constants.AshId)
-                                .Select(h => h.id)
-                                .Union(this.Zeds.OrderBy(_ => random.Next())
-                                                .Select(zed => zed.id)),
-                    shouldLog);
-            }
-            else
-            {
-                yield return new Simulation(
-                    this.Zeds,
-                    this.Humans,
-                    this.Zeds.OrderBy(_ => random.Next())
-                             .Select(zed => zed.id)
-                             .Union(this.Humans.OrderBy(_ => random.Next())
-                                               .Where(h => h.id != Constants.AshId)
-                                               .Select(h => h.id))
-                             .OrderBy(_ => random.Next()),
-                    shouldLog);
-                gauranteedZedFirstSeedGenerated = true;
-            }
+            yield return new Simulation(this.EnvironmentData, genome, shouldLog);
         }
     }
 }
@@ -321,7 +280,7 @@ public static class PopulationExtensions
 
     }
 
-    public static IEnumerable<Simulation> GenerateOffSpring(this ICollection<Simulation> currentPop, IEnumerable<(int id, ZData data)> zeds, IEnumerable<(int id, HData data)> humans, double mutationChance, bool shouldLog = false)
+    public static IEnumerable<Simulation> GenerateOffSpring(this ICollection<Simulation> currentPop, IEnvironmentData<IEnumerable<int>> environmentData, double mutationChance, bool shouldLog = false)
     {
         Stopwatch sw = Stopwatch.StartNew();
         if(shouldLog) Console.Error.WriteLine("Determining offspring for a generation");
@@ -352,7 +311,7 @@ public static class PopulationExtensions
         for(int i = 0; i < childCount; i++)
         {
             sw.Restart();
-            yield return new Simulation(zeds, humans, aGroup[i].ProcessOrder.Crossover(bGroup[i].ProcessOrder, shouldLog).Mutate(mutationChance, shouldLog), shouldLog);
+            yield return new Simulation(environmentData, aGroup[i].ProcessOrder.Crossover(bGroup[i].ProcessOrder, shouldLog).Mutate(mutationChance, shouldLog), shouldLog);
             if(shouldLog) Console.Error.WriteLine($"  Time for breedResult {sw.ElapsedMilliseconds}ms");
         }
     }
@@ -402,7 +361,84 @@ public static class PopulationExtensions
     }
 }
 
-public class Simulation
+public interface IGenome<T>
+{
+    T GetGenome();
+
+    void SetGenome(T genome);
+}
+
+public interface IEnvironmentData<T>
+{
+    object GetEnvironmentItem(string key);
+
+    IEnumerable<T> BuildBasePopulationGenome(Random random, int populationSize);
+
+}
+
+public class CVZEnvironmentData : IEnvironmentData<IEnumerable<int>>
+{
+    public CVZEnvironmentData(ICollection<(int id, ZData data)> zeds, ICollection<(int id, HData data)> humans)
+    {
+        this.Zeds = zeds;
+        this.Humans = humans;
+    }
+
+    public object GetEnvironmentItem(string key) => key switch
+    {
+        Constants.ZEDS => this.Zeds,
+        Constants.HUMANS => this.Humans,
+        _ => throw new NotImplementedException()
+    };
+
+    public IEnumerable<IEnumerable<int>> BuildBasePopulationGenome(Random random, int populationSize)
+    {
+        bool gauranteedZedFirstSeedGenerated = false;
+        bool gauranteedHumanFirstSeedGenerated = false;
+        for(int i = 0; i < populationSize; i++)
+        {
+            if(!gauranteedZedFirstSeedGenerated)
+            {
+                yield return
+                    this.Zeds.OrderBy(_ => random.Next())
+                             .Select(zed => zed.id)
+                             .Union(this.Humans.OrderBy(_ => random.Next())
+                                               .Where(h => h.id != Constants.AshId)
+                                               .Select(h => h.id));
+                    
+                gauranteedZedFirstSeedGenerated = true;
+            }
+            else if(!gauranteedHumanFirstSeedGenerated)
+            {
+                yield return this.Humans.OrderBy(_ => random.Next())
+                                .Where(h => h.id != Constants.AshId)
+                                .Select(h => h.id)
+                                .Union(this.Zeds.OrderBy(_ => random.Next())
+                                                .Select(zed => zed.id));
+                gauranteedHumanFirstSeedGenerated = true;
+            }
+            else
+            {
+                yield return this.Zeds.OrderBy(_ => random.Next())
+                             .Select(zed => zed.id)
+                             .Union(this.Humans.OrderBy(_ => random.Next())
+                                               .Where(h => h.id != Constants.AshId)
+                                               .Select(h => h.id))
+                             .OrderBy(_ => random.Next());
+                
+            }
+        }
+    }
+
+    private ICollection<(int id, ZData data)> Zeds { get; set; }
+    private ICollection<(int id, HData data)> Humans { get; set; }
+
+
+
+}
+
+
+public class Simulation : IGenome<int[]>
 {
     Dictionary<int, Zed> Zeds;
     Dictionary<int, Human> Humans;
@@ -420,10 +456,10 @@ public class Simulation
         this.Humans = new Dictionary<int, Human>();
         this.ProcessOrder = Array.Empty<int>();
     }
-    public Simulation(IEnumerable<(int id, ZData data)> zeds, IEnumerable<(int id, HData data)> humans, IEnumerable<int> processOrder, bool shouldLog = false)
+    public Simulation(IEnvironmentData<IEnumerable<int>> environmentData, IEnumerable<int> processOrder, bool shouldLog = false)
     {
-        this.Zeds = zeds.ToDictionary(kvp => kvp.id, kvp => new Zed { Data = kvp.data });
-        this.Humans = humans.ToDictionary(kvp => kvp.id, kvp => new Human { Data = kvp.data });
+        this.Zeds = ((ICollection<(int id, ZData data)>)environmentData.GetEnvironmentItem(Constants.ZEDS)).ToDictionary(kvp => kvp.id, kvp => new Zed { Data = kvp.data });
+        this.Humans = ((ICollection<(int id, HData data)>)environmentData.GetEnvironmentItem(Constants.HUMANS)).ToDictionary(kvp => kvp.id, kvp => new Human { Data = kvp.data });
         this.ProcessOrder = processOrder.ToArray();
         this.shouldLog = shouldLog;
     }
@@ -506,6 +542,16 @@ public class Simulation
     {
         this.score = score;
     }
+
+    public int[] GetGenome()
+    {
+        return this.ProcessOrder;
+    }
+
+    public void SetGenome(int[] genome)
+    {
+        this.ProcessOrder = genome;
+    }
 }
 
 public class Human
@@ -546,6 +592,8 @@ public struct ZData
 public static class Constants
 {
     public const int AshId = -50000;
+    public const string ZEDS = "ZEDS";
+    public const string HUMANS = "HUMANS";
 }
 
 
