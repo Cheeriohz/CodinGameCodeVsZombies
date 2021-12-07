@@ -17,10 +17,11 @@ class Player
     {
         
         string[] inputs;
-        int[] processOrder = Array.Empty<int>();
-        int pIndex = Constants.GENERAL_GENOME_START;
+        int[] currentGenome = Array.Empty<int>();
+        int pIndex = 0;
         int currentFinalScore = 0;
         int currentScore = 0;
+        int currentRound = 0;
         Simulation currentSim = new Simulation();
 
         // game loop
@@ -68,56 +69,34 @@ class Player
             Console.Error.WriteLine($"Current Score is believed to be {currentScore} | Expect Final {currentFinalScore}");
 
             CVZEnvironmentData environmentData = new CVZEnvironmentData(zeds, humans);
-            Population population = new Population(environmentData);
-            (int[] testOrder, int testFinalScore) = population.GetFittestSubject(20, 6, 0.30, currentProcessTime, 90 - currentSim.round, false);
+            Population population = new Population(environmentData, false);
+            (int[] testOrder, int testFinalScore) = population.GetFittestSubject(Math.Max(15, zeds.Count + humans.Count + 4) , Math.Max(6, zeds.Count + humans.Count), 0.30, currentProcessTime, 90, false);
 
-            //if(testFinalScore >= currentFinalScore - currentScore)
-            if(processOrder == Array.Empty<int>())
+            if(testFinalScore >= currentFinalScore - currentScore)
             {
-                processOrder = testOrder;
+                currentGenome = testOrder;
                 currentFinalScore = testFinalScore + currentScore;
 
-                currentSim = new Simulation(environmentData, true).SetGenome(processOrder);
+                currentSim = new Simulation(environmentData, false).SetGenome(currentGenome);
                 currentSim.OverrideScore(currentScore);
-                new Simulation(environmentData, true).SetGenome(processOrder).RunSimulation();
-                pIndex = Constants.GENERAL_GENOME_START;
+                new Simulation(environmentData, true).SetGenome(currentGenome).RunSimulation();
+                pIndex = 0;
             }
-            
-            currentSim.RunNextSimRound();
-            currentScore = currentSim.Score;
+
+            Zeds = zeds.ToDictionary(kvp => kvp.id, kvp => new Zed { Data = kvp.data });
+            Humans = humans.ToDictionary(kvp => kvp.id, kvp => new Human { Data = kvp.data });
+
+            Simulation.RunNextSimRound(Zeds, Humans, currentGenome[Constants.GENERAL_GENOME_START..], ref pIndex, ref currentScore, ref currentRound, currentSim.StopAtCivilian, currentSim.CentroidSize, currentSim.ZedsOnly, false);
 
             Console.Error.Write($"Next round score is expected to be {currentScore} | Expect Final {currentFinalScore} | Genome [");
-            foreach(int v in processOrder)
+            foreach(int v in currentGenome)
             {
                 Console.Error.Write(v.ToString());
             }
             Console.Error.WriteLine("]");
 
-            Zeds = zeds.ToDictionary(kvp => kvp.id, kvp => new Zed { Data = kvp.data });
-            Humans = humans.ToDictionary(kvp => kvp.id, kvp => new Human { Data = kvp.data });
+            Console.WriteLine($"{Humans[Constants.AshId].X} {Humans[Constants.AshId].Y}");
 
-            bool moveDetermined = false;
-            while(!moveDetermined)
-            {
-                int tId = processOrder[pIndex];
-                
-                if(tId >= 0 && Zeds.ContainsKey(tId))
-                {
-                    ZedUtil.MoveAsh(Zeds[tId].ZXNext, Zeds[tId].ZYNext, Humans[Constants.AshId], false);
-                    Console.WriteLine($"{Humans[Constants.AshId].X} {Humans[Constants.AshId].Y}");
-                    moveDetermined = true;
-                }    
-                else if(Humans.ContainsKey(tId))
-                {
-                    ZedUtil.MoveAsh(Humans[tId].X, Humans[tId].Y, Humans[Constants.AshId], currentSim.StopAtCivilian);
-                    Console.WriteLine($"{Humans[Constants.AshId].X} {Humans[Constants.AshId].Y}");
-                    moveDetermined = true;
-                }
-                else
-                {
-                    pIndex++;
-                }
-            }
         }
     }
 }
@@ -128,10 +107,13 @@ public class Population
 
     public Simulation[] CurrentGeneration { get; set; }
 
-    public Population(IEnvironmentData<IEnumerable<int>> environmentData)
+    private bool UseSteadyGeneration { get; set; }
+
+    public Population(IEnvironmentData<IEnumerable<int>> environmentData, bool useSteadyGeneration)
     {
         this.EnvironmentData = environmentData;
         this.CurrentGeneration = Array.Empty<Simulation>();
+        this.UseSteadyGeneration = useSteadyGeneration;
     }
 
     public (int[], int) GetFittestSubject(int initialPopulationSize, int survivorConstraintSize, double mutationChance, long currentProcessMs, int fullProcessTimeAllocationInMs, bool shouldLog = false)
@@ -159,7 +141,7 @@ public class Population
             generationTime.Start();
 
             this.CurrentGeneration 
-                = this.CurrentGeneration.GenerateOffSpring(this.EnvironmentData, mutationChance)
+                = this.CurrentGeneration.GenerateOffSpring(this.EnvironmentData, mutationChance, this.UseSteadyGeneration)
                       .DetermineFitness(fitnessResults)
                       .DetermineSurvivors(survivorConstraintSize).ToArray();
 
@@ -172,19 +154,19 @@ public class Population
         
         Console.Error.WriteLine($"Full processing of population evolution took {currentProcessMs / 1000000 }ms. Processed {generationsProcessed} generations");
 
-        if(shouldLog)
+        if(true)
         {
             Console.Error.WriteLine($"Final Fitness report for population");
-            foreach(KeyValuePair<int[], int> kvp in fitnessResults)
+            foreach(Simulation? finalGen in this.CurrentGeneration)
             {
-                if(kvp.Value != 0)
+                if(finalGen != null && fitnessResults.TryGetValue(finalGen.GetGenome(), out int score) && score != 0)
                 {
-                    foreach(int v in kvp.Key)
+                    foreach(int v in finalGen.GetGenome())
                     {
                         Console.Error.Write(v.ToString());
                     }
 
-                    Console.Error.WriteLine($" results in a score of {kvp.Value}");
+                    Console.Error.WriteLine($" results in a score of {score}");
                 }
             }
         }
@@ -197,11 +179,15 @@ public class Population
         foreach(IEnumerable<int> genome in this.EnvironmentData.BuildBasePopulationGenome(random, populationSize))
         {
             int[] genomeArray = genome.ToArray();
-            foreach(int v in genomeArray)
+
+            if(shouldLog)
             {
-                Console.Error.Write(v.ToString());
+                foreach(int v in genomeArray)
+                {
+                    Console.Error.Write(v.ToString());
+                }
+                Console.Error.WriteLine(" was generated for initial population");
             }
-            Console.Error.WriteLine(" was generated for initial population");
 
             yield return new Simulation(this.EnvironmentData, shouldLog).SetGenome(genomeArray);
         }
@@ -219,11 +205,12 @@ public static class PopulationExtensions
 
         int?[] result = new int?[fitterGenome.Count];
         HashSet<int> alreadyInSequence = new HashSet<int>();
-        int stockSize = random.Next(Constants.GENERAL_GENOME_START, fitterGenome.Count);
-        int stockOffset = random.Next(0, Math.Max(fitterGenome.Count - stockSize - Constants.GENERAL_GENOME_START, 0));
+        int stockSize = random.Next(0, fitterGenome.Count - Constants.GENERAL_GENOME_START);
+        int stockOffset = random.Next(Constants.GENERAL_GENOME_START, fitterGenome.Count - stockSize);
 
         result[0] = (random.NextDouble() > .65) ? fitterGenome.ElementAt(0) : partnerGenome.ElementAt(0);
         result[1] = (random.NextDouble() > .65) ? fitterGenome.ElementAt(1) : partnerGenome.ElementAt(1);
+        result[2] = (random.NextDouble() > .65) ? fitterGenome.ElementAt(2) : partnerGenome.ElementAt(2);
 
         for(int i = stockOffset; i < stockOffset + stockSize; i++)
         {
@@ -232,7 +219,7 @@ public static class PopulationExtensions
             result[i] = allele;
         }
 
-        int[] remainingGenomeFromPartner = partnerGenome.Where(allele => !alreadyInSequence.Contains(allele)).ToArray();
+        int[] remainingGenomeFromPartner = partnerGenome.Skip(Constants.GENERAL_GENOME_START).Where(allele => !alreadyInSequence.Contains(allele)).ToArray();
 
         int rInd = Constants.GENERAL_GENOME_START; 
         int pInd = Constants.GENERAL_GENOME_START;
@@ -255,13 +242,11 @@ public static class PopulationExtensions
                 Console.Error.WriteLine();
             }
         }
-
-        
-
         if(shouldLog) Console.Error.WriteLine($"Crossover Complete");
+
         foreach(int? v in result)
         {
-            yield return v ?? 0;
+            yield return v ?? Constants.UH_OH;
         }
     }
 
@@ -276,13 +261,13 @@ public static class PopulationExtensions
             do
             {
                 if(shouldLog) Console.Error.WriteLine("Mutating Genome");
-                int swapA = random.Next(0, finalGenome.Length);
-                int swapB = random.Next(0, finalGenome.Length);
+                int swapA = random.Next(Constants.GENERAL_GENOME_START, finalGenome.Length);
+                int swapB = random.Next(Constants.GENERAL_GENOME_START, finalGenome.Length);
 
                 int temp = finalGenome[swapA];
                 finalGenome[swapA] = finalGenome[swapB];
                 finalGenome[swapB] = temp;
-            } while(random.NextDouble() < mutationChance && mutateCount++ < finalGenome.Length / 2);
+            } while(random.NextDouble() < mutationChance && mutateCount++ < (finalGenome.Length - Constants.GENERAL_GENOME_START) / 2);
 
             if(shouldLog) Console.Error.WriteLine("Mutation Complete");
             return finalGenome;
@@ -295,7 +280,7 @@ public static class PopulationExtensions
 
     }
 
-    public static IEnumerable<Simulation> GenerateOffSpring(this ICollection<Simulation> currentPop, IEnvironmentData<IEnumerable<int>> environmentData, double mutationChance, bool shouldLog = false)
+    public static IEnumerable<Simulation> GenerateOffSpring(this ICollection<Simulation> currentPop, IEnvironmentData<IEnumerable<int>> environmentData, double mutationChance, bool useSteadyGeneration, bool shouldLog = false)
     {
         Stopwatch sw = Stopwatch.StartNew();
         if(shouldLog) Console.Error.WriteLine("Determining offspring for a generation");
@@ -307,7 +292,7 @@ public static class PopulationExtensions
         for(int i = 0; i < currentPop.Count; i++)
         {
             Simulation selectedSim = currentPop.ElementAt(i);
-            yield return selectedSim;
+            if(useSteadyGeneration) yield return selectedSim;
             (inAGroup ? aGroup : bGroup).Add(selectedSim);
             inAGroup = !inAGroup;
         }
@@ -330,11 +315,32 @@ public static class PopulationExtensions
             yield return new Simulation(environmentData, shouldLog).SetGenome(crossBredGenome);
             if(shouldLog) Console.Error.WriteLine($"  Time for breedResult {sw.ElapsedMilliseconds}ms");
         }
+
+        if(!useSteadyGeneration)
+        {
+
+            bGroup = bGroup.OrderBy(_ => random.Next()).ToList();
+            for(int i = 0; i < childCount; i++)
+            {
+                sw.Restart();
+                int[] crossBredGenome = aGroup[i].GetGenome().Crossover(bGroup[i].GetGenome()).Mutate(mutationChance, shouldLog).ToArray();
+                yield return new Simulation(environmentData, shouldLog).SetGenome(crossBredGenome);
+                if(shouldLog) Console.Error.WriteLine($"  Time for breedResult {sw.ElapsedMilliseconds}ms");
+            }
+
+            bGroup = bGroup.OrderBy(_ => random.Next()).ToList();
+            for(int i = 0; i < childCount; i++)
+            {
+                sw.Restart();
+                int[] crossBredGenome = aGroup[i].GetGenome().Crossover(bGroup[i].GetGenome()).Mutate(mutationChance, shouldLog).ToArray();
+                yield return new Simulation(environmentData, shouldLog).SetGenome(crossBredGenome);
+                if(shouldLog) Console.Error.WriteLine($"  Time for breedResult {sw.ElapsedMilliseconds}ms");
+            }
+        }
     }
 
     public static IEnumerable<Simulation> DetermineFitness(this IEnumerable<Simulation> competitorsToEvaluate, Dictionary<int[], int> allResults,  bool shouldLog = false)
     {
-        if(shouldLog) Console.Error.WriteLine("Determining a fitness for a generation");
         foreach(Simulation competitor in competitorsToEvaluate)
         {
             if(allResults.TryGetValue(competitor.GetGenome(), out int preCalculatedResult))
@@ -353,19 +359,19 @@ public static class PopulationExtensions
             }
             else
             {
+                if(shouldLog)
+                {
+                    Console.Error.WriteAsync($"Genome of ");
+                    foreach(int v in competitor.GetGenome())
+                    {
+                        Console.Error.WriteAsync(v.ToString());
+                    }
+                    Console.Error.WriteLineAsync($" was not present in cache");
+                }
+                
                 competitor.RunSimulation();
                 allResults[competitor.GetGenome()] = competitor.Score;
             }
-            yield return competitor;
-        }
-    }
-
-    public static IEnumerable<Simulation> DetermineFitnessIterationLimited(this IEnumerable<Simulation> competitorsToEvaluate, int turnsToProcessTo, bool shouldLog = false)
-    {
-        if(shouldLog) Console.Error.WriteLine("Determining a fitness iteration limited for a generation");
-        foreach(Simulation competitor in competitorsToEvaluate)
-        {
-            while(competitor.round < turnsToProcessTo && competitor.RunNextSimRound()) { }
             yield return competitor;
         }
     }
@@ -413,11 +419,14 @@ public class CVZEnvironmentData : IEnvironmentData<IEnumerable<int>>
         bool gauranteedHumanFirstSeedGenerated = false;
         bool guaranteedCivStop = false;
         bool guaranteedCivGo = false;
+
+        int totalCount = this.Zeds.Count + this.Humans.Count - 1;
+
         for(int i = 0; i < populationSize; i++)
         {
             if(!gauranteedZedFirstSeedGenerated)
             {
-                yield return new [] { random.Next(0, 1) , 0}.Concat(
+                yield return new [] { random.Next(0, 1) , random.Next(0, 3) == 2 ? 0 : random.Next(1, totalCount) }.Concat(
                     this.Zeds.OrderBy(_ => random.Next())
                              .Select(zed => zed.id)
                              .Union(this.Humans.OrderBy(_ => random.Next())
@@ -428,7 +437,7 @@ public class CVZEnvironmentData : IEnvironmentData<IEnumerable<int>>
             }
             else if(!gauranteedHumanFirstSeedGenerated)
             {
-                yield return new[] { random.Next(0, 1), 0 }.Concat(this.Humans.OrderBy(_ => random.Next())
+                yield return new[] { random.Next(0, 2), random.Next(0, 3) == 2 ? 0 : random.Next(1, totalCount), random.Next(0, 2) }.Concat(this.Humans.OrderBy(_ => random.Next())
                                 .Where(h => h.id != Constants.AshId)
                                 .Select(h => h.id)
                                 .Union(this.Zeds.OrderBy(_ => random.Next())
@@ -437,7 +446,7 @@ public class CVZEnvironmentData : IEnvironmentData<IEnumerable<int>>
             }
             else if(!guaranteedCivStop)
             {
-                yield return new[] { 1, 0 }.Concat(this.Zeds.OrderBy(_ => random.Next())
+                yield return new[] { 1, random.Next(0, 3) == 2 ? 0 : random.Next(1, totalCount), random.Next(0, 2) }.Concat(this.Zeds.OrderBy(_ => random.Next())
                              .Select(zed => zed.id)
                              .Union(this.Humans.OrderBy(_ => random.Next())
                                                .Where(h => h.id != Constants.AshId)
@@ -447,7 +456,7 @@ public class CVZEnvironmentData : IEnvironmentData<IEnumerable<int>>
             }
             else if(!guaranteedCivGo)
             {
-                yield return new[] { 0, 0 }.Concat(this.Zeds.OrderBy(_ => random.Next())
+                yield return new[] { 0, random.Next(0, 3) == 2 ? 0 : random.Next(1, totalCount), random.Next(0, 2) }.Concat(this.Zeds.OrderBy(_ => random.Next())
                              .Select(zed => zed.id)
                              .Union(this.Humans.OrderBy(_ => random.Next())
                                                .Where(h => h.id != Constants.AshId)
@@ -457,7 +466,7 @@ public class CVZEnvironmentData : IEnvironmentData<IEnumerable<int>>
             }
             else
             {
-                yield return new[] { random.Next(0, 1), 0 }.Concat(this.Zeds.OrderBy(_ => random.Next())
+                yield return new[] { random.Next(0, 2), random.Next(0, 3) == 2 ? 0 : random.Next(1, totalCount), random.Next(0, 2) }.Concat(this.Zeds.OrderBy(_ => random.Next())
                              .Select(zed => zed.id)
                              .Union(this.Humans.OrderBy(_ => random.Next())
                                                .Where(h => h.id != Constants.AshId)
@@ -485,10 +494,10 @@ public class Simulation : IGenome<int[], Simulation>
     public int Score => this.Humans.Values.Count == 1 ? 0 : this.score;
     private int score = 0;
     int pIndex = 0;
-    private int[]? ProcessOrder;
+    private int[] ProcessOrder;
     public bool StopAtCivilian;
-    int CentroidSize = 0;
-    private bool UseCentroid => this.CentroidSize > 0;
+    public int CentroidSize = 0;
+    public bool ZedsOnly;
     bool shouldLog = false;
 
     public Simulation() 
@@ -502,6 +511,7 @@ public class Simulation : IGenome<int[], Simulation>
         this.Zeds = ((ICollection<(int id, ZData data)>)environmentData.GetEnvironmentItem(Constants.ZEDS)).ToDictionary(kvp => kvp.id, kvp => new Zed { Data = kvp.data });
         this.Humans = ((ICollection<(int id, HData data)>)environmentData.GetEnvironmentItem(Constants.HUMANS)).ToDictionary(kvp => kvp.id, kvp => new Human { Data = kvp.data });
         this.shouldLog = shouldLog;
+        this.ProcessOrder = Array.Empty<int>();
     }
 
     public int RunSimulation()
@@ -509,54 +519,25 @@ public class Simulation : IGenome<int[], Simulation>
         this.pIndex = 0;
         while(this.Zeds.Any() && this.pIndex < this.ProcessOrder?.Length)
         {
-            int tId = this.ProcessOrder[this.pIndex];
-            if(tId >= 0 && this.Zeds.ContainsKey(tId))
-            {
-                ZedUtil.MoveZombies(this.Zeds, this.Humans);
-                ZedUtil.MoveAsh(this.Zeds[tId].X, this.Zeds[tId].Y, this.Humans[Constants.AshId], false, this.shouldLog);
-                this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
-                if(this.shouldLog) this.LogState();
-                this.pIndex--;
-                this.round++;
-            }
-            else if(tId < 0 && this.Humans.ContainsKey(tId))
-            {
-                ZedUtil.MoveZombies(this.Zeds, this.Humans);
-                ZedUtil.MoveAsh(this.Humans[tId].X, this.Humans[tId].Y, this.Humans[Constants.AshId], this.StopAtCivilian, this.shouldLog);
-                this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
-                if(this.shouldLog) this.LogState();
-                this.pIndex--;
-                this.round++;
-            }
-            this.pIndex++;
-
+            RunNextSimRound(this.Zeds, this.Humans, this.ProcessOrder, ref this.pIndex, ref this.score, ref this.round, this.StopAtCivilian, this.CentroidSize, this.ZedsOnly, this.shouldLog);
         }
         return this.score;
     }
 
-    public bool RunNextSimRound()
+    public static bool RunNextSimRound(Dictionary<int, Zed> zeds, Dictionary<int, Human> humans, int[]? processOrder, ref int pIndex, ref int score, ref int round, bool stopAtCivilians, int centroidSize, bool zedsOnly, bool shouldLog = false)
     {
-        while(this.Zeds.Any())
+        if(zeds.Any())
         {
-            for(this.pIndex = 0; this.pIndex < this.ProcessOrder?.Length; this.pIndex++)
+            for(pIndex = 0; pIndex < processOrder?.Length; pIndex++)
             {
-                int tId = this.ProcessOrder[this.pIndex];
-                if(tId >= 0 && this.Zeds.ContainsKey(tId))
+                if(CanDetermineAshPositioning(processOrder, ref pIndex, centroidSize, zeds, humans))
                 {
-                    ZedUtil.MoveZombies(this.Zeds, this.Humans);
-                    ZedUtil.MoveAsh(this.Zeds[tId].X, this.Zeds[tId].Y, this.Humans[Constants.AshId], false, this.shouldLog);
-                    this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
-                    if(this.shouldLog) this.LogState();
-                    this.round++;
-                    return true;
-                }
-                else if(tId < 0 && this.Humans.ContainsKey(tId))
-                {
-                    ZedUtil.MoveZombies(this.Zeds, this.Humans);
-                    ZedUtil.MoveAsh(this.Humans[tId].X, this.Humans[tId].Y, this.Humans[Constants.AshId], this.StopAtCivilian, this.shouldLog);
-                    this.score += ZedUtil.ProcessRoundDeaths(this.Zeds, this.Humans, this.shouldLog);
-                    if(this.shouldLog) this.LogState();
-                    this.round++;
+                    ZedUtil.MoveZombies(zeds, humans);
+                    ZedUtil.MoveAsh(DetermineAshPositioningSafe(processOrder, ref pIndex, centroidSize, zedsOnly, zeds, humans), humans[Constants.AshId], (centroidSize > 0 || processOrder[pIndex] < 0) && stopAtCivilians, shouldLog);
+                    score += ZedUtil.ProcessRoundDeaths(zeds, humans, shouldLog);
+                    if(humans.Count == 1) score = 0;
+                    if(shouldLog) LogState();
+                    round++;
                     return true;
                 }
             }
@@ -564,7 +545,77 @@ public class Simulation : IGenome<int[], Simulation>
         return false;
     }
 
-    public void LogState()
+    private static bool CanDetermineAshPositioning(int[]? processOrder, ref int pIndex, int centroidSize, Dictionary<int, Zed> zeds, Dictionary<int, Human> humans)
+    {
+        if(centroidSize != 0) return true;
+        if(processOrder == null) return false;
+
+        int tId = processOrder[pIndex];
+        if(tId >= 0 && zeds.ContainsKey(tId))
+        {
+            return true;
+        }
+        else if(tId < 0 && humans.ContainsKey(tId))
+        {
+            return true;
+        }
+        return false;
+    }
+
+    private static (int x, int y) DetermineAshPositioningSafe(int[]? processOrder, ref int pIndex, int centroidSize, bool zedsOnly, Dictionary<int, Zed> zeds, Dictionary<int, Human> humans)
+    {
+        (int x, int y) = DetermineAshPositioning(processOrder, ref pIndex, centroidSize, zedsOnly, zeds, humans);
+        if(x == -1 && y == -1 )
+        {
+            Zed aZed = zeds.Values.FirstOrDefault();
+            if (aZed != null)
+            {
+                return (aZed.X, aZed.Y);
+            }
+        }
+        return (x, y);
+    }
+
+    private static (int x, int y) DetermineAshPositioning(int[]? processOrder, ref int pIndex, int centroidSize, bool zedsOnly, Dictionary<int, Zed> zeds, Dictionary<int, Human> humans)
+    {
+        if(processOrder == null) return (0, 0);
+
+        if(centroidSize == 0) return DetermineSinglePosition(processOrder, pIndex, false, zeds, humans);
+
+        int xSum = 0;
+        int ySum = 0;
+        int identificationCount = 0;
+
+        for(int i = pIndex; i < processOrder.Length; i++)
+        {
+            (int X, int Y) = DetermineSinglePosition(processOrder, i, zedsOnly, zeds, humans);
+            if(X >= 0 && Y >= 0)
+            {
+                xSum += X;
+                ySum += Y;
+                identificationCount++;
+            }
+        }
+
+        return identificationCount > 0 ? (xSum / identificationCount, ySum / identificationCount) : (-1, -1);
+    }
+
+    private static (int x, int y) DetermineSinglePosition(int[] processOrder, int pIndex, bool zedsOnly, Dictionary<int, Zed> zeds, Dictionary<int, Human> humans)
+    {
+        int tId = processOrder[pIndex];
+        if(tId >= 0 && zeds.TryGetValue(tId, out Zed zed))
+        {
+            return (zed.X, zed.Y);
+        }
+        else if(tId < 0 && humans.TryGetValue(tId, out Human human) && !zedsOnly)
+        {
+            return (human.X, human.Y);
+        }
+
+        return (-1, -1);
+    }
+
+    public static void LogState()
     {
         //Console.Error.WriteLine($"Logging Round {this.round}");
         //foreach(KeyValuePair<int, Zed> zed in this.Zeds)
@@ -585,13 +636,14 @@ public class Simulation : IGenome<int[], Simulation>
 
     public int[] GetGenome()
     {
-        return new [] { this.StopAtCivilian ? 1 : 0, this.CentroidSize  }.Concat(this.ProcessOrder ?? Array.Empty<int>()).ToArray();
+        return new [] { this.StopAtCivilian ? 1 : 0, this.CentroidSize, this.ZedsOnly ? 1 : 0  }.Concat(this.ProcessOrder ?? null).ToArray();
     }
 
     public Simulation SetGenome(int[] genome)
     {
         this.StopAtCivilian = genome[0] == 1;
         this.CentroidSize = genome[1];
+        this.ZedsOnly = genome[2] == 1;
         this.ProcessOrder = genome[Constants.GENERAL_GENOME_START..];
         return this;
     }
@@ -634,8 +686,9 @@ public struct ZData
 
 public static class Constants
 {
-    public const int GENERAL_GENOME_START = 2;
+    public const int GENERAL_GENOME_START = 3;
     public const int AshId = -50000;
+    public const int UH_OH = -666;
     public const string ZEDS = "ZEDS";
     public const string HUMANS = "HUMANS";
 }
@@ -652,17 +705,17 @@ public static class ZedUtil
         }
     }
 
-    public static void MoveAsh(int zX, int zY, Human ash, bool stopAtLocation, bool shouldLog = false)
+    public static void MoveAsh((int zX, int zY) key, Human ash, bool stopAtLocation, bool shouldLog = false)
     {
-        int distanceToZed = Utility.CalculateDistanceAsInt(ash.X, ash.Y, zX, zY);
-        if(shouldLog) Console.Error.Write($"Moving ash from ({ash.X},{ash.Y} towards ({zX},{zX}) )");
+        int distanceToZed = Utility.CalculateDistanceAsInt(ash.X, ash.Y, key.zX, key.zY);
+        if(shouldLog) Console.Error.Write($"Moving ash from ({ash.X},{ash.Y} towards ({key.zX},{key.zY}) )");
         if(distanceToZed <= 1000 && stopAtLocation)
         {
-            ash.Data = new HData { X = zX, Y = zY };
+            ash.Data = new HData { X = key.zX, Y = key.zY };
         }
         else
         {
-            (int nX, int nY) = Utility.ProjectDistanceFromPointToPoint(ash.X, ash.Y, zX, zY, 1000);
+            (int nX, int nY) = Utility.ProjectDistanceFromPointToPoint(ash.X, ash.Y, key.zX, key.zY, 1000);
             ash.Data = new HData { X = Math.Max(Math.Min(nX, 16000), 0) , Y = Math.Max(Math.Min(nY, 9000), 0) };
         }
         if(shouldLog) Console.Error.WriteLine($"resulting at ({ash.X},{ash.Y})");
@@ -702,7 +755,7 @@ public static class ZedUtil
                 if(zed.X == human.Value.X && zed.Y == human.Value.Y)
                 {
                     humans.Remove(human.Key);
-                    if(shouldLog) Console.Error.WriteLine($"--SIM-- Human {human.Key} at ({human.Value.X},{human.Value.Y})");
+                    if(shouldLog) Console.Error.WriteLine($"--SIM-- Human {(human.Key + 1 )* -1 } at ({human.Value.X},{human.Value.Y})");
                 }
             }
         }
